@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.python-version
+
+# Packaging / test / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Conda
+conda-meta/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Notebook
+.ipynb_checkpoints/
+
+# Logs
+logs/
+*.log
+*.pid
+
+# Runtime / local services
+dump.rdb
+appendonly.aof
+redis-data/
+
+# Local model weights and caches
+models/
+checkpoints/
+cache/
+.cache/
+.huggingface/
+hf_home/
+hf_cache/
+transformers_cache/
+torch_cache/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# Translation inputs / outputs
+data/
+downloads/
+uploads/
+outputs/
+exports/
+tmp/
+temp/
+
