@@ -7,15 +7,21 @@ from fastapi import FastAPI, HTTPException
 
 from app.schemas import (
     APIError,
+    KakuyomuExtractResponse,
+    KakuyomuTranslateResponse,
     PDFExtractRequest,
     PDFExtractResponse,
     PDFParagraph,
+    TranslateWebKakuyomuRequest,
     TranslateJaRequest,
     TranslateJaResponse,
     TranslatedParagraph,
+    TranslatedWebParagraph,
+    WebExtractRequest,
 )
 from app.services.pdf_extractor import extract_pdf_paragraphs
 from app.services.translation import TranslationRuntime, build_aligned_paragraphs
+from app.services.web_extractor import extract_kakuyomu_episode
 
 
 logging.basicConfig(level=logging.INFO)
@@ -99,4 +105,79 @@ def extract_pdf(payload: PDFExtractRequest) -> PDFExtractResponse:
             )
             for item in paragraphs
         ],
+    )
+
+
+@app.post(
+    "/extract/web/kakuyomu",
+    response_model=KakuyomuExtractResponse,
+    responses={400: {"model": APIError}},
+)
+def extract_kakuyomu(payload: WebExtractRequest) -> KakuyomuExtractResponse:
+    try:
+        episode = extract_kakuyomu_episode(payload.url, timeout_seconds=payload.timeout_seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Kakuyomu extraction failed: {exc}") from exc
+
+    return KakuyomuExtractResponse(
+        url=episode.url,
+        work_title=episode.work_title,
+        episode_title=episode.episode_title,
+        paragraphs=[
+            {
+                "paragraph_id": item.paragraph_id,
+                "kind": item.kind,
+                "text": item.text,
+            }
+            for item in episode.paragraphs
+        ],
+    )
+
+
+@app.post(
+    "/translate/web/kakuyomu",
+    response_model=KakuyomuTranslateResponse,
+    responses={400: {"model": APIError}, 500: {"model": APIError}},
+)
+def translate_kakuyomu_episode(payload: TranslateWebKakuyomuRequest) -> KakuyomuTranslateResponse:
+    try:
+        episode = extract_kakuyomu_episode(payload.url, timeout_seconds=payload.timeout_seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Kakuyomu extraction failed: {exc}") from exc
+
+    try:
+        translated_texts = translator.translate_paragraphs(
+            [item.text for item in episode.paragraphs],
+            batch_size=payload.batch_size,
+            max_new_tokens=payload.max_new_tokens,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Kakuyomu translation failed: {exc}") from exc
+
+    paragraphs = [
+        TranslatedWebParagraph(
+            paragraph_id=item.paragraph_id,
+            kind=item.kind,
+            original_text=item.text,
+            translated_text=translated_text,
+        )
+        for item, translated_text in zip(episode.paragraphs, translated_texts, strict=True)
+    ]
+    translated_title = paragraphs[0].translated_text.strip() if paragraphs and paragraphs[0].translated_text.strip() else episode.episode_title
+
+    return KakuyomuTranslateResponse(
+        url=episode.url,
+        work_title=episode.work_title,
+        episode_title=episode.episode_title,
+        source_title=episode.episode_title,
+        translated_title=translated_title,
+        model_name=translator.model_name,
+        device=translator.device,
+        paragraphs=paragraphs,
     )

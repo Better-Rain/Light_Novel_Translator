@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -12,7 +12,8 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 LOGGER = logging.getLogger(__name__)
 
-MODEL_NAME = os.getenv("JA_ZH_MODEL_PATH", "Helsinki-NLP/opus-mt-ja-zh")
+DEFAULT_REMOTE_JA_ZH_MODEL = "shun89/opus-mt-ja-zh"
+MODEL_NAME = os.getenv("JA_ZH_MODEL_PATH") or os.getenv("JA_ZH_MODEL_NAME", DEFAULT_REMOTE_JA_ZH_MODEL)
 PARAGRAPH_SPLIT_PATTERN = re.compile(r"\n\s*\n+", re.MULTILINE)
 
 
@@ -26,11 +27,12 @@ class TranslationRuntime:
     model_name: str = MODEL_NAME
     device: str = "cpu"
     dtype: torch.dtype = torch.float32
+    _load_lock: threading.Lock = field(init=False, repr=False)
+    _tokenizer: AutoTokenizer | None = field(init=False, default=None, repr=False)
+    _model: AutoModelForSeq2SeqLM | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._load_lock = threading.Lock()
-        self._tokenizer: AutoTokenizer | None = None
-        self._model: AutoModelForSeq2SeqLM | None = None
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
         if self.device.startswith("cuda"):
@@ -47,16 +49,27 @@ class TranslationRuntime:
 
             LOGGER.info("Loading translation model '%s' on %s", self.model_name, self.device)
             local_files_only = os.getenv("HF_LOCAL_FILES_ONLY", "0") == "1"
-            tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name,
-                local_files_only=local_files_only,
-            )
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                self.model_name,
-                torch_dtype=self.dtype,
-                low_cpu_mem_usage=True,
-                local_files_only=local_files_only,
-            )
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_name,
+                    local_files_only=local_files_only,
+                )
+                model = AutoModelForSeq2SeqLM.from_pretrained(
+                    self.model_name,
+                    dtype=self.dtype,
+                    low_cpu_mem_usage=True,
+                    local_files_only=local_files_only,
+                )
+            except Exception as exc:  # noqa: BLE001
+                guidance = (
+                    f"Unable to load Japanese->Chinese model '{self.model_name}'. "
+                    "For offline usage, manually download a compatible Marian model and set "
+                    "JA_ZH_MODEL_PATH to the local directory. "
+                    "Current direct candidate: 'shun89/opus-mt-ja-zh'. "
+                    "Official two-step fallback: 'Helsinki-NLP/opus-mt-ja-en' -> "
+                    "'Helsinki-NLP/opus-mt-en-zh'."
+                )
+                raise RuntimeError(guidance) from exc
             model.to(self.device)
             model.eval()
 
