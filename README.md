@@ -97,6 +97,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local-servic
 
 启动后可访问：
 
+- `http://127.0.0.1:7860/`
 - `http://127.0.0.1:7860/docs`
 - `http://127.0.0.1:7860/health`
 
@@ -111,6 +112,26 @@ Invoke-RestMethod -Uri "http://127.0.0.1:7860/health"
 ```json
 {"status":"ok"}
 ```
+
+Web UI 使用方式：
+
+- 在浏览器打开 `http://127.0.0.1:7860/`
+- 把 Kakuyomu 单章 URL 粘贴到输入框
+- UI 会自动执行整条链路：抓取 -> 翻译 -> 本地保存
+- 完成后可以在以下模式之间切换：
+  - 阅读模式
+  - 对比阅读
+  - 逐句对比
+
+保存目录结构：
+
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/result.json`
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/bilingual.html`
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/reading.html`
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/index.html`
+- `outputs/library/kakuyomu/<work-id>/index.html`
+
+这样每一章都会稳定归档到对应的作品 ID 和章节 ID 之下，不依赖文件名猜测归属关系。
 
 ## 5. 日语翻译接口
 
@@ -323,7 +344,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:7860/extract/pdf" -Method Post -Content
 - Syosetu 还没有单独适配
 - 术语库、Redis 缓存、双语导出和用户修正学习仍是后续阶段
 - 日轻风格保真度目前取决于现有 Marian 模型，后续可能需要更高质量模型或两段式翻译方案
-- 当前阅读页与对照页仍偏开发验证用途，正式前端的阅读体验后续再单独优化
+- 现在已经提供浏览器 Web UI，但“逐句对比”仍然是基于标点切分的启发式对齐，不是真正的翻译句对齐
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\batch-translate.ps1 -InputPath ".\data" -BatchSize 4 -MaxNewTokens 192
 ```
 
@@ -444,7 +465,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-kakuyomu.ps1 
 
 这个结果可以作为下一步“网页正文 -> 本地翻译”的输入基础。
 
-如果你想直接完成“抽取 -> 翻译 -> JSON + HTML 导出”的自动链路，可以使用：
+如果你想直接完成“抽取 -> 翻译 -> JSON + HTML 导出”的自动链路，可以使用 Web UI，或者使用下面的脚本：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\translate-kakuyomu.ps1 -EpisodeUrl "https://kakuyomu.jp/works/16816700429269320184/episodes/16816700429269681154"
@@ -465,6 +486,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\translate-kakuyomu
 - `*.html` 是原文在左、译文在右的双栏核对页，适合查实翻译问题
 - `*.reading.html` 是只看译文的阅读页
 - `index.html` 是当前章节输出的入口页
+
+面向 Web UI 的后端接口：
+
+- `POST /ui/api/kakuyomu/translate-save`
+- `GET /ui/api/kakuyomu/history`
+- `GET /ui/api/kakuyomu/result/{work_id}/{episode_id}`
+
+Web UI 默认使用稳定存储目录：
+
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/...`
 
 如果你想固定输出目录名：
 

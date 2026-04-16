@@ -96,6 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local-servic
 
 After startup:
 
+- `http://127.0.0.1:7860/`
 - `http://127.0.0.1:7860/docs`
 - `http://127.0.0.1:7860/health`
 
@@ -110,6 +111,26 @@ Expected:
 ```json
 {"status":"ok"}
 ```
+
+Web UI:
+
+- Open `http://127.0.0.1:7860/` in the browser
+- Paste a Kakuyomu single-episode URL into the input box
+- The UI will run the full chain: extraction -> translation -> local save
+- After completion, switch between:
+  - Reading mode
+  - Side-by-side comparison mode
+  - Sentence comparison mode
+
+Saved output layout:
+
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/result.json`
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/bilingual.html`
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/reading.html`
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/index.html`
+- `outputs/library/kakuyomu/<work-id>/index.html`
+
+This keeps every episode stably grouped under its Kakuyomu work id and episode id instead of relying on filenames alone.
 
 ## 5. Japanese translation API
 
@@ -365,7 +386,7 @@ Default output:
 
 This becomes the foundation for the later step of feeding extracted web text into the local translation workflow.
 
-If you want the full automatic chain "extract -> translate -> JSON + HTML output", use:
+If you want the full automatic chain "extract -> translate -> JSON + HTML output", use either the Web UI or the script below:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\translate-kakuyomu.ps1 -EpisodeUrl "https://kakuyomu.jp/works/16816700429269320184/episodes/16816700429269681154"
@@ -386,6 +407,16 @@ Meaning:
 - `*.html` is the bilingual validation page with original text on the left and translation on the right
 - `*.reading.html` is the merged translation reading page
 - `index.html` is the entry page for the current episode output
+
+Web UI-oriented backend endpoints:
+
+- `POST /ui/api/kakuyomu/translate-save`
+- `GET /ui/api/kakuyomu/history`
+- `GET /ui/api/kakuyomu/result/{work_id}/{episode_id}`
+
+The Web UI uses the stable storage layout below:
+
+- `outputs/library/kakuyomu/<work-id>/<episode-id>/...`
 
 If you want a fixed output folder name:
 
@@ -507,4 +538,4 @@ Model files, source documents, and generated outputs in these folders should nor
 - Syosetu is not adapted yet
 - Terminology dictionaries, Redis caching, bilingual export, and user-correction learning remain future work
 - Literary quality for light novels currently depends on the Marian checkpoint and may require a stronger model or a multi-step fallback later
-- The current reading and bilingual pages are still developer-oriented outputs; the final front-end reading experience can be optimized separately later
+- A browser-based Web UI is available now, but the sentence-comparison view is still heuristic punctuation-based splitting rather than true translation alignment

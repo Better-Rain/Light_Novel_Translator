@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -12,24 +13,38 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_REMOTE_JA_ZH_MODEL = "shun89/opus-mt-ja-zh"
-MODEL_NAME = os.getenv("JA_ZH_MODEL_PATH") or os.getenv("JA_ZH_MODEL_NAME", DEFAULT_REMOTE_JA_ZH_MODEL)
+DEFAULT_MODELS: dict[tuple[str, str], str] = {
+    ("ja", "zh"): "shun89/opus-mt-ja-zh",
+    ("en", "zh"): "Helsinki-NLP/opus-mt-en-zh",
+}
+MODEL_ENV_KEYS: dict[tuple[str, str], tuple[str, str]] = {
+    ("ja", "zh"): ("JA_ZH_MODEL_PATH", "JA_ZH_MODEL_NAME"),
+    ("en", "zh"): ("EN_ZH_MODEL_PATH", "EN_ZH_MODEL_NAME"),
+}
 PARAGRAPH_SPLIT_PATTERN = re.compile(r"\n\s*\n+", re.MULTILINE)
 
 
+@dataclass(slots=True)
+class LoadedTranslationModel:
+    source_language: str
+    target_language: str
+    model_name: str
+    tokenizer: AutoTokenizer
+    model: AutoModelForSeq2SeqLM
+
+
 def _normalize_paragraphs(text: str) -> list[str]:
-    paragraphs = [segment.strip() for segment in PARAGRAPH_SPLIT_PATTERN.split(text) if segment.strip()]
-    return paragraphs
+    return [segment.strip() for segment in PARAGRAPH_SPLIT_PATTERN.split(text) if segment.strip()]
 
 
 @dataclass(slots=True)
 class TranslationRuntime:
-    model_name: str = MODEL_NAME
+    default_source_language: str = "ja"
+    default_target_language: str = "zh"
     device: str = "cpu"
     dtype: torch.dtype = torch.float32
     _load_lock: threading.Lock = field(init=False, repr=False)
-    _tokenizer: AutoTokenizer | None = field(init=False, default=None, repr=False)
-    _model: AutoModelForSeq2SeqLM | None = field(init=False, default=None, repr=False)
+    _models: dict[tuple[str, str], LoadedTranslationModel] = field(init=False, default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         self._load_lock = threading.Lock()
@@ -39,67 +54,99 @@ class TranslationRuntime:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
-    def _ensure_loaded(self) -> None:
-        if self._model is not None and self._tokenizer is not None:
-            return
+    @property
+    def model_name(self) -> str:
+        return self.get_model_name(self.default_source_language, self.default_target_language)
+
+    def get_model_name(self, source_language: str, target_language: str) -> str:
+        key = (source_language, target_language)
+        env_path_key, env_name_key = MODEL_ENV_KEYS.get(key, ("", ""))
+        if env_path_key and os.getenv(env_path_key):
+            return str(os.getenv(env_path_key))
+        if env_name_key and os.getenv(env_name_key):
+            return str(os.getenv(env_name_key))
+        if key in DEFAULT_MODELS:
+            return DEFAULT_MODELS[key]
+        raise RuntimeError(f"Unsupported translation pair: {source_language}->{target_language}")
+
+    def _ensure_loaded(self, source_language: str, target_language: str) -> LoadedTranslationModel:
+        key = (source_language, target_language)
+        loaded = self._models.get(key)
+        if loaded is not None:
+            return loaded
 
         with self._load_lock:
-            if self._model is not None and self._tokenizer is not None:
-                return
+            loaded = self._models.get(key)
+            if loaded is not None:
+                return loaded
 
-            LOGGER.info("Loading translation model '%s' on %s", self.model_name, self.device)
+            model_name = self.get_model_name(source_language, target_language)
+            LOGGER.info("Loading translation model '%s' for %s->%s on %s", model_name, source_language, target_language, self.device)
             local_files_only = os.getenv("HF_LOCAL_FILES_ONLY", "0") == "1"
             try:
                 tokenizer = AutoTokenizer.from_pretrained(
-                    self.model_name,
+                    model_name,
                     local_files_only=local_files_only,
                 )
                 model = AutoModelForSeq2SeqLM.from_pretrained(
-                    self.model_name,
+                    model_name,
                     dtype=self.dtype,
                     low_cpu_mem_usage=True,
                     local_files_only=local_files_only,
                 )
             except Exception as exc:  # noqa: BLE001
                 guidance = (
-                    f"Unable to load Japanese->Chinese model '{self.model_name}'. "
-                    "For offline usage, manually download a compatible Marian model and set "
-                    "JA_ZH_MODEL_PATH to the local directory. "
-                    "Current direct candidate: 'shun89/opus-mt-ja-zh'. "
-                    "Official two-step fallback: 'Helsinki-NLP/opus-mt-ja-en' -> "
-                    "'Helsinki-NLP/opus-mt-en-zh'."
+                    f"Unable to load translation model '{model_name}' for {source_language}->{target_language}. "
+                    "For offline usage, manually download a compatible Marian/Seq2Seq model and set the matching "
+                    "environment variable, for example JA_ZH_MODEL_PATH or EN_ZH_MODEL_PATH."
                 )
                 raise RuntimeError(guidance) from exc
+
             model.to(self.device)
             model.eval()
-
-            self._tokenizer = tokenizer
-            self._model = model
+            loaded = LoadedTranslationModel(
+                source_language=source_language,
+                target_language=target_language,
+                model_name=model_name,
+                tokenizer=tokenizer,
+                model=model,
+            )
+            self._models[key] = loaded
+            return loaded
 
     def translate_paragraphs(
         self,
         paragraphs: list[str],
         *,
+        source_language: str = "ja",
+        target_language: str = "zh",
         batch_size: int = 16,
         max_new_tokens: int = 256,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[str]:
         if not paragraphs:
             return []
 
-        self._ensure_loaded()
-        assert self._tokenizer is not None
-        assert self._model is not None
-
+        loaded = self._ensure_loaded(source_language, target_language)
         results: list[str] = []
         current_batch_size = max(1, batch_size)
         index = 0
+        total = len(paragraphs)
+        if progress_callback is not None:
+            progress_callback(0, total)
 
         while index < len(paragraphs):
             batch = paragraphs[index : index + current_batch_size]
             try:
-                translated_batch = self._generate_batch(batch, max_new_tokens=max_new_tokens)
+                translated_batch = self._generate_batch(
+                    loaded,
+                    batch,
+                    max_new_tokens=max_new_tokens,
+                )
                 results.extend(translated_batch)
                 index += len(batch)
+                if progress_callback is not None:
+                    progress_callback(index, total)
             except torch.cuda.OutOfMemoryError:
                 if not self.device.startswith("cuda"):
                     raise
@@ -127,11 +174,14 @@ class TranslationRuntime:
 
         return results
 
-    def _generate_batch(self, paragraphs: list[str], *, max_new_tokens: int) -> list[str]:
-        assert self._tokenizer is not None
-        assert self._model is not None
-
-        encoded = self._tokenizer(
+    def _generate_batch(
+        self,
+        loaded: LoadedTranslationModel,
+        paragraphs: list[str],
+        *,
+        max_new_tokens: int,
+    ) -> list[str]:
+        encoded = loaded.tokenizer(
             paragraphs,
             return_tensors="pt",
             padding=True,
@@ -141,7 +191,7 @@ class TranslationRuntime:
         encoded = {key: value.to(self.device) for key, value in encoded.items()}
 
         with torch.inference_mode():
-            generated = self._model.generate(
+            generated = loaded.model.generate(
                 **encoded,
                 max_new_tokens=max_new_tokens,
                 num_beams=4,
@@ -150,7 +200,7 @@ class TranslationRuntime:
                 early_stopping=True,
             )
 
-        decoded = self._tokenizer.batch_decode(generated, skip_special_tokens=True)
+        decoded = loaded.tokenizer.batch_decode(generated, skip_special_tokens=True)
         return [item.strip() for item in decoded]
 
 
