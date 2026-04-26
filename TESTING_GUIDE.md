@@ -156,6 +156,22 @@ last_page 451
 kind_counts {'chapter_heading': 22, 'paragraph': 2865, 'heading': 27}
 ```
 
+如果需要定位某一页为什么被保留、丢弃或降级，可以生成抽取决策调试报告：
+
+```powershell
+& "D:\anaconda3\envs\ln-translator\python.exe" .\scripts\debug_pdf_extraction.py ".\The Death and Life of Great American Cities (Jane Jacobs) (z-library.sk, 1lib.sk, z-lib.sk).pdf" --output outputs\pdf_extraction_debug_report.json
+```
+
+预期现象：
+
+- 控制台输出 `Main content start page: 12`。
+- 控制台输出 `End matter start page: 452` 左右。
+- 控制台输出 `Filtered blocks: 2914` 左右。
+- `outputs\pdf_extraction_debug_report.json` 会包含 `filter_report.pages`。
+- 页级报告里可以看到 `kept`、`running_header`、`suspicious_heading`、`ocr_heading_noise`、`end_matter` 等原因计数和样本文本。
+
+生成的 JSON 在 `outputs/` 下，默认只用于本地观察，不需要提交到仓库。
+
 ## 7. Kakuyomu 单章链路检查
 
 在 Web UI 选择 `Kakuyomu 单章`，输入 Kakuyomu episode URL 后点击开始。

@@ -267,7 +267,7 @@ TOC generation is too trusting:
 6. Add a debug report output for extractor decisions:
    - page summaries,
    - kept/dropped/demoted counts,
-   - heading score and reason list.
+   - filter reason counts and sample blocks.
 
 ## Web UI / Reading UX Findings
 
@@ -461,6 +461,11 @@ Recommended fix:
 6. Add extractor debug report for page/block decisions.
 7. Add bounded UI job queue and job TTL cleanup.
 8. Refresh README files to match shipped behavior.
+
+Completed follow-up after this audit:
+
+- Added `scripts/debug_pdf_extraction.py` and `build_pdf_extraction_debug_report()` for page/block filtering reports.
+- Refreshed `README.md`, `README.en.md`, and `TESTING_GUIDE.md` to describe English translation, PDF save/history, Web UI debug caps, output paths, and the extractor debug-report workflow.
 
 ## Suggested Regression Tests
 

@@ -4,7 +4,7 @@ import re
 import statistics
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -61,6 +61,12 @@ class _PageSummary:
     has_cover_like_layout: bool
     has_quote_like_layout: bool
     has_toc_signal: bool
+
+
+@dataclass(slots=True)
+class _FilterDecision:
+    action: str
+    reason: str
 
 
 def extract_pdf_paragraphs(file_path: str | Path) -> list[RawPDFParagraph]:
@@ -133,6 +139,82 @@ def extract_pdf_paragraphs(file_path: str | Path) -> list[RawPDFParagraph]:
             )
 
         return paragraphs
+
+
+def build_pdf_extraction_debug_report(file_path: str | Path) -> dict:
+    pdf_path = Path(file_path).expanduser().resolve()
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF file does not exist: {pdf_path}")
+    if pdf_path.suffix.lower() != ".pdf":
+        raise ValueError(f"Expected a PDF file, got: {pdf_path}")
+
+    try:
+        document = fitz.open(pdf_path)
+    except fitz.FileDataError as exc:
+        raise ValueError(f"Unable to open PDF: {pdf_path}") from exc
+
+    with document:
+        body_font_size = _estimate_body_font_size(document)
+        repeated_margin_texts = _find_repeated_margin_texts(document)
+        raw_blocks: list[_BlockCandidate] = []
+        raw_text_block_count = 0
+        repeated_margin_skip_count = 0
+        noise_skip_count = 0
+        empty_skip_count = 0
+
+        for page_index in range(document.page_count):
+            page = document.load_page(page_index)
+            page_height = page.rect.height
+            page_dict = page.get_text("dict")
+            blocks = [block for block in page_dict.get("blocks", []) if block.get("type") == 0]
+            raw_text_block_count += len(blocks)
+
+            for block in blocks:
+                text = _extract_block_text(block)
+                if not text:
+                    empty_skip_count += 1
+                    continue
+                if _normalize_margin_text(text) in repeated_margin_texts:
+                    repeated_margin_skip_count += 1
+                    continue
+                if _is_noise_block(text, block, page_height):
+                    noise_skip_count += 1
+                    continue
+                raw_blocks.append(
+                    _BlockCandidate(
+                        text=text,
+                        page_number=page_index + 1,
+                        page_height=page_height,
+                        bbox=tuple(block.get("bbox", [0.0, 0.0, 0.0, 0.0])),
+                        kind=_classify_block(text, block, body_font_size),
+                    )
+                )
+
+        merged_blocks = _merge_adjacent_blocks(raw_blocks, body_font_size)
+        grouped_blocks = _group_blocks_by_page(merged_blocks)
+        title_hints = _build_title_hints(pdf_path)
+        main_content_start = _detect_main_content_start(grouped_blocks)
+        filtered_blocks, filter_report = _filter_content_blocks_with_report(grouped_blocks, main_content_start, title_hints)
+
+        return {
+            "file_path": str(pdf_path),
+            "page_count": document.page_count,
+            "body_font_size": body_font_size,
+            "main_content_start_page": main_content_start,
+            "counts": {
+                "raw_text_blocks": raw_text_block_count,
+                "raw_candidates": len(raw_blocks),
+                "merged_blocks": len(merged_blocks),
+                "filtered_blocks": len(filtered_blocks),
+                "empty_skips": empty_skip_count,
+                "repeated_margin_skips": repeated_margin_skip_count,
+                "noise_skips": noise_skip_count,
+            },
+            "raw_kind_counts": dict(Counter(block.kind for block in raw_blocks)),
+            "merged_kind_counts": dict(Counter(block.kind for block in merged_blocks)),
+            "filtered_kind_counts": dict(Counter(block.kind for block in filtered_blocks)),
+            "filter_report": filter_report,
+        }
 
 
 def _estimate_body_font_size(document: fitz.Document) -> float:
@@ -600,18 +682,106 @@ def _filter_content_blocks(
     return kept
 
 
+def _filter_content_blocks_with_report(
+    page_blocks: list[tuple[int, list[_BlockCandidate]]],
+    main_content_start: int,
+    title_hints: set[str],
+) -> tuple[list[_BlockCandidate], dict]:
+    kept: list[_BlockCandidate] = []
+    known_titles = {title for title in title_hints if title}
+    page_reports: list[dict] = []
+    reason_counts: Counter[str] = Counter()
+    end_matter_start_page: int | None = None
+    skipped_before_start = 0
+
+    for page_number, blocks in page_blocks:
+        summary = _summarize_page(page_number, blocks)
+        if page_number < main_content_start:
+            skipped_before_start += len(blocks)
+            page_reports.append(
+                {
+                    "page_number": page_number,
+                    "stage": "before_main_content",
+                    "summary": asdict(summary),
+                    "input_blocks": len(blocks),
+                    "kept_blocks": 0,
+                    "dropped_blocks": len(blocks),
+                    "demoted_blocks": 0,
+                    "reason_counts": {"before_main_content": len(blocks)},
+                    "samples": _sample_blocks(blocks),
+                }
+            )
+            reason_counts["before_main_content"] += len(blocks)
+            continue
+
+        if page_number > main_content_start + 10 and _is_end_matter_page(page_number, blocks):
+            end_matter_start_page = page_number
+            remaining_blocks = sum(len(items) for candidate_page, items in page_blocks if candidate_page >= page_number)
+            reason_counts["end_matter"] += remaining_blocks
+            page_reports.append(
+                {
+                    "page_number": page_number,
+                    "stage": "end_matter_start",
+                    "summary": asdict(summary),
+                    "input_blocks": len(blocks),
+                    "kept_blocks": 0,
+                    "dropped_blocks": len(blocks),
+                    "demoted_blocks": 0,
+                    "reason_counts": {"end_matter": len(blocks)},
+                    "samples": _sample_blocks(blocks),
+                }
+            )
+            break
+
+        page_kept, decisions = _filter_page_blocks_with_decisions(blocks, known_titles)
+        kept.extend(page_kept)
+        for block in page_kept:
+            if _is_heading_kind(block.kind):
+                known_titles.add(_normalize_title_fingerprint(block.text))
+
+        page_reason_counts = Counter(decision.reason for _, decision in decisions)
+        page_reports.append(
+            {
+                "page_number": page_number,
+                "stage": "filtered",
+                "summary": asdict(summary),
+                "input_blocks": len(blocks),
+                "kept_blocks": sum(1 for _, decision in decisions if decision.action == "keep"),
+                "dropped_blocks": sum(1 for _, decision in decisions if decision.action == "drop"),
+                "demoted_blocks": sum(1 for _, decision in decisions if decision.action == "demote"),
+                "reason_counts": dict(page_reason_counts),
+                "samples": _sample_decisions(decisions),
+            }
+        )
+        reason_counts.update(page_reason_counts)
+
+    return kept, {
+        "skipped_before_start_blocks": skipped_before_start,
+        "end_matter_start_page": end_matter_start_page,
+        "reason_counts": dict(reason_counts),
+        "pages": page_reports,
+    }
+
+
 def _filter_page_blocks(blocks: list[_BlockCandidate], known_titles: set[str]) -> list[_BlockCandidate]:
+    page_kept, _ = _filter_page_blocks_with_decisions(blocks, known_titles)
+    return page_kept
+
+
+def _filter_page_blocks_with_decisions(
+    blocks: list[_BlockCandidate],
+    known_titles: set[str],
+) -> tuple[list[_BlockCandidate], list[tuple[_BlockCandidate, _FilterDecision]]]:
     page_has_body = any(block.kind == "paragraph" for block in blocks)
     filtered: list[_BlockCandidate] = []
+    decisions: list[tuple[_BlockCandidate, _FilterDecision]] = []
 
     for block in blocks:
-        if _looks_like_footer_candidate(block):
+        decision = _classify_filter_decision(block, page_has_body, known_titles)
+        decisions.append((block, decision))
+        if decision.action == "drop":
             continue
-        if _looks_like_running_header_candidate(block, page_has_body, known_titles):
-            continue
-        if _looks_like_ocr_heading_noise(block, page_has_body):
-            continue
-        if _should_demote_heading_to_paragraph(block, page_has_body):
+        if decision.action == "demote":
             filtered.append(
                 _BlockCandidate(
                     text=block.text,
@@ -624,7 +794,23 @@ def _filter_page_blocks(blocks: list[_BlockCandidate], known_titles: set[str]) -
             continue
         filtered.append(block)
 
-    return filtered
+    return filtered, decisions
+
+
+def _classify_filter_decision(
+    block: _BlockCandidate,
+    page_has_body: bool,
+    known_titles: set[str],
+) -> _FilterDecision:
+    if _looks_like_footer_candidate(block):
+        return _FilterDecision("drop", "footer")
+    if _looks_like_running_header_candidate(block, page_has_body, known_titles):
+        return _FilterDecision("drop", "running_header")
+    if _looks_like_ocr_heading_noise(block, page_has_body):
+        return _FilterDecision("drop", "ocr_heading_noise")
+    if _should_demote_heading_to_paragraph(block, page_has_body):
+        return _FilterDecision("demote", "suspicious_heading")
+    return _FilterDecision("keep", "kept")
 
 
 def _looks_like_footer_candidate(block: _BlockCandidate) -> bool:
@@ -784,6 +970,39 @@ def _is_end_matter_page(page_number: int, blocks: list[_BlockCandidate]) -> bool
         return True
     short_entry_count = sum(1 for block in blocks if len(block.text) <= 80 and re.search(r"\b\d{1,4}\b", block.text))
     return page_number > 300 and short_entry_count >= max(8, len(blocks) // 2)
+
+
+def _sample_blocks(blocks: list[_BlockCandidate], limit: int = 5) -> list[dict]:
+    return [
+        {
+            "text": block.text[:160],
+            "kind": block.kind,
+            "bbox": block.bbox,
+        }
+        for block in blocks[:limit]
+    ]
+
+
+def _sample_decisions(
+    decisions: list[tuple[_BlockCandidate, _FilterDecision]],
+    limit: int = 8,
+) -> list[dict]:
+    samples: list[dict] = []
+    for block, decision in decisions:
+        if decision.action == "keep" and len(samples) >= limit:
+            continue
+        samples.append(
+            {
+                "action": decision.action,
+                "reason": decision.reason,
+                "kind": block.kind,
+                "text": block.text[:160],
+                "bbox": block.bbox,
+            }
+        )
+        if len(samples) >= limit:
+            break
+    return samples
 
 
 def _build_title_hints(pdf_path: Path) -> set[str]:
