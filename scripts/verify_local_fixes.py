@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.main import app
 from app.schemas import PDFTranslateResponse
-from app.services.pdf_extractor import extract_pdf_paragraphs
+from app.services.pdf_extractor import _looks_like_chapter_title, _looks_like_sentence, extract_pdf_paragraphs
 from app.services.pdf_pipeline import build_pdf_translation_result
 from app.services.storage_paths import safe_child, validate_storage_id
 
@@ -90,6 +90,16 @@ def verify_debug_schema(sample_pdf: Path) -> None:
     print("[ok] PDF debug limits survive response schema and document id suffixing")
 
 
+def verify_japanese_pdf_heuristics() -> None:
+    if not _looks_like_chapter_title("第1章 はじめに"):
+        raise AssertionError("Japanese chapter heading was not recognized")
+    if not _looks_like_chapter_title("プロローグ"):
+        raise AssertionError("Japanese prologue heading was not recognized")
+    if not _looks_like_sentence("これはかなり長い日本語の本文であり、見出しではなく通常の段落として扱われるべき文章です。"):
+        raise AssertionError("Long Japanese body sentence was not recognized")
+    print("[ok] Japanese PDF heading/body heuristics recognize basic chapter and sentence patterns")
+
+
 def verify_sample_pdf(sample_pdf: Path) -> None:
     paragraphs = extract_pdf_paragraphs(sample_pdf)
     if not paragraphs:
@@ -125,6 +135,7 @@ def main() -> int:
     args = parse_args()
     verify_storage_paths()
     verify_api_rejects_bad_ids()
+    verify_japanese_pdf_heuristics()
 
     sample_pdf = args.sample_pdf.expanduser().resolve()
     if args.skip_pdf:

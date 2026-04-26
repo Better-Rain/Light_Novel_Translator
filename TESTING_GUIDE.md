@@ -43,6 +43,7 @@ $env:HF_LOCAL_FILES_ONLY="1"
 
 - 输出 `[ok] storage id validation...`
 - 输出 `[ok] saved-result APIs reject invalid identifiers`
+- 输出 `[ok] Japanese PDF heading/body heuristics...`
 - 有样例 PDF 时，输出 `first_page=12`、`last_page=451` 左右。
 - 有样例 PDF 时，输出 debug document id suffix/schema 通过。
 

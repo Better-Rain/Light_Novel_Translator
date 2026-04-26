@@ -17,7 +17,17 @@ SECTION_PATTERN = re.compile(
     r"^(chapter|section|part|appendix|preface|introduction|prologue|epilogue)\b|^\d+(\.\d+)*\b|^[IVXLC]+\.\s",
     re.IGNORECASE,
 )
+JAPANESE_SECTION_PATTERN = re.compile(
+    r"^(?:"
+    r"第[0-9０-９一二三四五六七八九十百千万]+[章部編篇節話]"
+    r"|[0-9０-９一二三四五六七八九十百千万]+[章部編篇節話]"
+    r"|序章|終章|プロローグ|エピローグ|まえがき|前書き|あとがき|後書き|はじめに|おわりに"
+    r")(?:[\s　:：\-―ー].*)?$"
+)
 TOC_ENTRY_PATTERN = re.compile(r".{4,}\b\d{1,4}\]?$")
+JAPANESE_TOC_ENTRY_PATTERN = re.compile(
+    r"^(?:第[0-9０-９一二三四五六七八九十百千万]+[章部編篇節話]|.{2,})[\s　.．…・\-―ー]{2,}\d{1,4}$"
+)
 FRONT_MATTER_KEYWORDS = (
     "contents",
     "table of contents",
@@ -32,9 +42,17 @@ FRONT_MATTER_KEYWORDS = (
     "dedication",
     "foreword",
     "preface",
+    "目次",
+    "図表一覧",
+    "謝辞",
+    "奥付",
+    "著作権",
+    "前書き",
+    "まえがき",
 )
 STOPWORD_TAILS = {"the", "and", "of", "to", "in", "by", "for", "with", "that", "from"}
 WEAK_HEADING_STARTS = {"and", "but", "if", "or", "so", "then"}
+JAPANESE_WEAK_HEADING_STARTS = ("そして", "しかし", "だが", "また", "さらに", "つまり", "一方", "そのため")
 
 
 @dataclass(slots=True)
@@ -378,7 +396,7 @@ def _classify_block(text: str, block: dict, body_font_size: float) -> str:
         and line_count <= 3
         and (max_size >= body_font_size * 1.18 or average_size >= body_font_size * 1.12 or bold_ratio >= 0.6)
     )
-    heading_by_pattern = short_enough and bool(SECTION_PATTERN.match(text))
+    heading_by_pattern = short_enough and bool(SECTION_PATTERN.match(text) or JAPANESE_SECTION_PATTERN.match(text))
     heading_by_case = short_enough and _looks_like_display_heading(text)
 
     if heading_by_pattern or (heading_by_style and _looks_like_chapter_title(text)):
@@ -501,6 +519,8 @@ def _looks_like_heading_fragment(text: str) -> bool:
     stripped = text.strip()
     if not stripped or _looks_like_sentence(stripped):
         return False
+    if _looks_like_japanese_heading_title(stripped):
+        return True
     letters = [char for char in stripped if char.isalpha()]
     uppercase_letters = [char for char in letters if char.isupper()]
     uppercase_ratio = len(uppercase_letters) / max(1, len(letters))
@@ -527,6 +547,8 @@ def _looks_like_chapter_title(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
+    if JAPANESE_SECTION_PATTERN.match(stripped):
+        return True
     if _weird_char_ratio(stripped) >= 0.08:
         return False
     if SECTION_PATTERN.match(stripped):
@@ -542,6 +564,8 @@ def _looks_like_chapter_title(text: str) -> bool:
 
 def _looks_like_sentence(text: str) -> bool:
     stripped = text.strip()
+    if _looks_like_japanese_sentence(stripped):
+        return True
     words = stripped.split()
     if len(words) < 7:
         return False
@@ -551,6 +575,44 @@ def _looks_like_sentence(text: str) -> bool:
     if lowercase_ratio >= 0.55:
         return True
     return lowercase_ratio >= 0.35 and sentence_punctuation >= 1
+
+
+def _looks_like_japanese_sentence(text: str) -> bool:
+    japanese_chars = _count_japanese_chars(text)
+    if japanese_chars < 18:
+        return False
+    if any(mark in text for mark in "。！？"):
+        return True
+    if len(text) >= 45 and any(mark in text for mark in "、，"):
+        return True
+    return len(text) >= 65 and japanese_chars / max(1, len(text)) >= 0.45
+
+
+def _looks_like_japanese_heading_title(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or _looks_like_japanese_sentence(stripped):
+        return False
+    japanese_chars = _count_japanese_chars(stripped)
+    if japanese_chars == 0:
+        return False
+    if len(stripped) > 42:
+        return False
+    if stripped.endswith(("。", "、", "，", "！", "？")):
+        return False
+    return japanese_chars / max(1, len(stripped)) >= 0.45
+
+
+def _count_japanese_chars(text: str) -> int:
+    return sum(1 for char in text if _is_japanese_char(char))
+
+
+def _is_japanese_char(char: str) -> bool:
+    return (
+        "\u3040" <= char <= "\u30ff"
+        or "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+    )
 
 
 def _looks_like_price(text: str) -> bool:
@@ -610,14 +672,18 @@ def _summarize_page(page_number: int, blocks: list[_BlockCandidate]) -> _PageSum
     chapter_blocks = [block for block in blocks if block.kind == "chapter_heading"]
     all_text = " ".join(block.text for block in blocks).casefold()
     front_matter_keyword_hits = sum(1 for keyword in FRONT_MATTER_KEYWORDS if keyword in all_text)
-    toc_entry_count = sum(1 for block in blocks if TOC_ENTRY_PATTERN.fullmatch(block.text.strip()))
+    toc_entry_count = sum(
+        1
+        for block in blocks
+        if TOC_ENTRY_PATTERN.fullmatch(block.text.strip()) or JAPANESE_TOC_ENTRY_PATTERN.fullmatch(block.text.strip())
+    )
     average_block_length = sum(len(block.text) for block in blocks) / max(1, len(blocks))
     body_char_count = sum(len(block.text) for block in paragraph_blocks)
     long_paragraph_count = sum(1 for block in paragraph_blocks if len(block.text) >= 220)
     short_heading_count = sum(1 for block in blocks if _is_heading_kind(block.kind) and len(block.text) <= 70)
     has_cover_like_layout = len(paragraph_blocks) == 0 and short_heading_count >= 3 and average_block_length <= 30
     has_quote_like_layout = len(paragraph_blocks) == 0 and len(blocks) >= 8 and average_block_length <= 90
-    has_toc_signal = "contents" in all_text or toc_entry_count >= 4
+    has_toc_signal = "contents" in all_text or "目次" in all_text or toc_entry_count >= 4
 
     return _PageSummary(
         page_number=page_number,
@@ -891,7 +957,8 @@ def _should_demote_heading_to_paragraph(block: _BlockCandidate, page_has_body: b
 def _weird_char_ratio(text: str) -> float:
     if not text:
         return 0.0
-    allowed = sum(1 for char in text if char.isalnum() or char.isspace() or char in ",.;:'\"!?-()[]/&")
+    allowed_chars = ",.;:'\"!?-()[]/&。、，．・：；！？「」『』（）【】《》〈〉—―ー〜～"
+    allowed = sum(1 for char in text if char.isalnum() or char.isspace() or char in allowed_chars)
     return max(0.0, 1 - (allowed / len(text)))
 
 
@@ -899,7 +966,11 @@ def _looks_like_valid_heading(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
-    if _looks_like_chapter_title(stripped) or _looks_like_spaced_caps_heading(stripped):
+    if (
+        _looks_like_chapter_title(stripped)
+        or _looks_like_spaced_caps_heading(stripped)
+        or _looks_like_japanese_heading_title(stripped)
+    ):
         return True
     if _looks_like_sentence(stripped):
         return False
@@ -947,6 +1018,10 @@ def _looks_like_short_body_fragment(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
+    if _count_japanese_chars(stripped) and (
+        stripped.startswith(JAPANESE_WEAK_HEADING_STARTS) or stripped.endswith(("、", "，"))
+    ):
+        return True
     words = stripped.split()
     if len(words) > 4:
         return False

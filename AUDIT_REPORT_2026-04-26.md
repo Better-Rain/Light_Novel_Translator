@@ -466,6 +466,7 @@ Completed follow-up after this audit:
 
 - Added `scripts/debug_pdf_extraction.py` and `build_pdf_extraction_debug_report()` for page/block filtering reports.
 - Refreshed `README.md`, `README.en.md`, and `TESTING_GUIDE.md` to describe English translation, PDF save/history, Web UI debug caps, output paths, and the extractor debug-report workflow.
+- Added basic Japanese PDF heading/body heuristics for `第N章` / `第N話` style headings, Japanese TOC/front-matter signals, and long Japanese body sentence detection.
 
 ## Suggested Regression Tests
 
