@@ -5,6 +5,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+PDFBlockKind = Literal["chapter_heading", "heading", "paragraph"]
+
+
 class TranslateJaRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Japanese text to translate.")
     max_new_tokens: int = Field(default=256, ge=32, le=1024)
@@ -48,12 +51,14 @@ class PDFTranslateRequest(BaseModel):
     source_language: Literal["en", "ja"] = Field(default="en")
     max_new_tokens: int = Field(default=256, ge=32, le=1024)
     batch_size: int = Field(default=8, ge=1, le=64)
+    debug_max_pages: int | None = Field(default=None, ge=1, le=10000)
+    debug_max_paragraphs: int | None = Field(default=None, ge=1, le=100000)
 
 
 class PDFParagraph(BaseModel):
     paragraph_id: str
     page_number: int
-    kind: Literal["heading", "paragraph"]
+    kind: PDFBlockKind
     section_title: str | None = None
     text: str
 
@@ -61,10 +66,18 @@ class PDFParagraph(BaseModel):
 class PDFTranslatedParagraph(BaseModel):
     paragraph_id: str
     page_number: int
-    kind: Literal["heading", "paragraph"]
+    kind: PDFBlockKind
     section_title: str | None = None
     original_text: str
     translated_text: str
+
+
+class PDFDebugLimits(BaseModel):
+    original_paragraph_count: int
+    limited_paragraph_count: int
+    max_pages: int | None = None
+    kept_through_page: int | None = None
+    max_paragraphs: int | None = None
 
 
 class PDFExtractResponse(BaseModel):
@@ -85,6 +98,7 @@ class PDFTranslateResponse(BaseModel):
     model_name: str
     device: str
     paragraphs: list[PDFTranslatedParagraph]
+    debug_limits: PDFDebugLimits | None = None
 
 
 class PDFSavedFiles(BaseModel):
@@ -115,6 +129,8 @@ class PDFHistoryItem(BaseModel):
     saved_at: str
     source_file: str
     source_language: Literal["en", "ja"]
+    is_debug: bool = False
+    debug_limits: PDFDebugLimits | None = None
     page_url: str
     result_api_url: str
     bilingual_html_url: str
@@ -250,7 +266,7 @@ class ParagraphChunk(BaseModel):
 class RawPDFParagraph(BaseModel):
     paragraph_id: str
     page_number: int
-    kind: Literal["heading", "paragraph"]
+    kind: PDFBlockKind
     section_title: str | None = None
     text: str
 

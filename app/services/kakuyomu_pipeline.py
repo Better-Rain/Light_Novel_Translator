@@ -13,6 +13,7 @@ from app.services.html_export import (
     render_reading_html,
     render_translation_html,
 )
+from app.services.storage_paths import safe_child, validate_storage_id
 from app.services.translation import TranslationRuntime
 from app.services.web_extractor import extract_kakuyomu_episode
 
@@ -26,7 +27,10 @@ def parse_kakuyomu_ids(url: str) -> tuple[str, str]:
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) < 4 or parts[0] != "works" or parts[2] != "episodes":
         raise ValueError("Expected a Kakuyomu episode URL like /works/<work-id>/episodes/<episode-id>.")
-    return parts[1], parts[3]
+    return (
+        validate_storage_id(parts[1], "Kakuyomu work_id"),
+        validate_storage_id(parts[3], "Kakuyomu episode_id"),
+    )
 
 
 def build_kakuyomu_translation_result(
@@ -87,9 +91,11 @@ def save_kakuyomu_translation_result(result: dict[str, Any]) -> dict[str, Any]:
     document["source_file"] = str(result.get("url", ""))
     document["source_file_name"] = str(result.get("episode_title", "episode"))
 
-    work_id = str(result["work_id"])
-    episode_id = str(result["episode_id"])
-    episode_root = KAKUYOMU_LIBRARY_ROOT / work_id / episode_id
+    work_id = validate_storage_id(str(result["work_id"]), "Kakuyomu work_id")
+    episode_id = validate_storage_id(str(result["episode_id"]), "Kakuyomu episode_id")
+    document["work_id"] = work_id
+    document["episode_id"] = episode_id
+    episode_root = safe_child(KAKUYOMU_LIBRARY_ROOT, work_id, episode_id)
     episode_root.mkdir(parents=True, exist_ok=True)
 
     result_json_path = episode_root / "result.json"
@@ -124,25 +130,32 @@ def save_kakuyomu_translation_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_saved_file_metadata(work_id: str, episode_id: str) -> dict[str, str]:
-    episode_root = KAKUYOMU_LIBRARY_ROOT / work_id / episode_id
+    work_id = validate_storage_id(work_id, "Kakuyomu work_id")
+    episode_id = validate_storage_id(episode_id, "Kakuyomu episode_id")
+    episode_root = safe_child(KAKUYOMU_LIBRARY_ROOT, work_id, episode_id)
     relative_root = episode_root.relative_to(OUTPUTS_ROOT).as_posix()
+    quoted_relative_root = urllib.parse.quote(relative_root, safe="/")
+    quoted_work_id = urllib.parse.quote(work_id)
+    quoted_episode_id = urllib.parse.quote(episode_id)
     return {
         "storage_dir": str(episode_root),
         "result_json": str(episode_root / "result.json"),
         "bilingual_html": str(episode_root / "bilingual.html"),
         "reading_html": str(episode_root / "reading.html"),
         "episode_index_html": str(episode_root / "index.html"),
-        "result_api_url": f"/ui/api/kakuyomu/result/{work_id}/{episode_id}",
+        "result_api_url": f"/ui/api/kakuyomu/result/{quoted_work_id}/{quoted_episode_id}",
         "page_url": f"/?work_id={urllib.parse.quote(work_id)}&episode_id={urllib.parse.quote(episode_id)}",
-        "result_json_url": f"/saved-files/{relative_root}/result.json",
-        "bilingual_html_url": f"/saved-files/{relative_root}/bilingual.html",
-        "reading_html_url": f"/saved-files/{relative_root}/reading.html",
-        "episode_index_html_url": f"/saved-files/{relative_root}/index.html",
+        "result_json_url": f"/saved-files/{quoted_relative_root}/result.json",
+        "bilingual_html_url": f"/saved-files/{quoted_relative_root}/bilingual.html",
+        "reading_html_url": f"/saved-files/{quoted_relative_root}/reading.html",
+        "episode_index_html_url": f"/saved-files/{quoted_relative_root}/index.html",
     }
 
 
 def load_saved_kakuyomu_result(work_id: str, episode_id: str) -> dict[str, Any]:
-    result_path = KAKUYOMU_LIBRARY_ROOT / work_id / episode_id / "result.json"
+    work_id = validate_storage_id(work_id, "Kakuyomu work_id")
+    episode_id = validate_storage_id(episode_id, "Kakuyomu episode_id")
+    result_path = safe_child(KAKUYOMU_LIBRARY_ROOT, work_id, episode_id) / "result.json"
     if not result_path.exists():
         raise FileNotFoundError(f"Saved Kakuyomu result not found for work '{work_id}' episode '{episode_id}'.")
     document = json.loads(result_path.read_text(encoding="utf-8"))
@@ -160,8 +173,12 @@ def list_saved_kakuyomu_results(limit: int = 20) -> list[dict[str, Any]]:
             data = json.loads(result_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        work_id = str(data.get("work_id") or result_path.parent.parent.name)
-        episode_id = str(data.get("episode_id") or result_path.parent.name)
+        try:
+            work_id = validate_storage_id(str(data.get("work_id") or result_path.parent.parent.name), "Kakuyomu work_id")
+            episode_id = validate_storage_id(str(data.get("episode_id") or result_path.parent.name), "Kakuyomu episode_id")
+            saved_files = build_saved_file_metadata(work_id, episode_id)
+        except ValueError:
+            continue
         items.append(
             {
                 "work_id": work_id,
@@ -172,9 +189,9 @@ def list_saved_kakuyomu_results(limit: int = 20) -> list[dict[str, Any]]:
                 "saved_at": str(data.get("saved_at", "")),
                 "url": str(data.get("url", "")),
                 "page_url": f"/?work_id={urllib.parse.quote(work_id)}&episode_id={urllib.parse.quote(episode_id)}",
-                "result_api_url": f"/ui/api/kakuyomu/result/{work_id}/{episode_id}",
-                "bilingual_html_url": build_saved_file_metadata(work_id, episode_id)["bilingual_html_url"],
-                "reading_html_url": build_saved_file_metadata(work_id, episode_id)["reading_html_url"],
+                "result_api_url": saved_files["result_api_url"],
+                "bilingual_html_url": saved_files["bilingual_html_url"],
+                "reading_html_url": saved_files["reading_html_url"],
             }
         )
 
@@ -183,7 +200,8 @@ def list_saved_kakuyomu_results(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def write_work_index(work_id: str) -> None:
-    work_root = KAKUYOMU_LIBRARY_ROOT / work_id
+    work_id = validate_storage_id(work_id, "Kakuyomu work_id")
+    work_root = safe_child(KAKUYOMU_LIBRARY_ROOT, work_id)
     work_root.mkdir(parents=True, exist_ok=True)
     episodes: list[dict[str, Any]] = []
     work_title = work_id
@@ -193,7 +211,11 @@ def write_work_index(work_id: str) -> None:
             data = json.loads(result_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        episode_id = result_path.parent.name
+        try:
+            episode_id = validate_storage_id(result_path.parent.name, "Kakuyomu episode_id")
+            saved_files = build_saved_file_metadata(work_id, episode_id)
+        except ValueError:
+            continue
         work_title = str(data.get("work_title", work_title))
         episodes.append(
             {
@@ -202,8 +224,8 @@ def write_work_index(work_id: str) -> None:
                 "translated_title": str(data.get("translated_title", "")),
                 "saved_at": str(data.get("saved_at", "")),
                 "page_url": f"/?work_id={urllib.parse.quote(work_id)}&episode_id={urllib.parse.quote(episode_id)}",
-                "bilingual_html_url": build_saved_file_metadata(work_id, episode_id)["bilingual_html_url"],
-                "reading_html_url": build_saved_file_metadata(work_id, episode_id)["reading_html_url"],
+                "bilingual_html_url": saved_files["bilingual_html_url"],
+                "reading_html_url": saved_files["reading_html_url"],
             }
         )
 
@@ -229,6 +251,10 @@ def write_library_index() -> None:
     KAKUYOMU_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
     works: list[dict[str, Any]] = []
     for work_root in sorted(path for path in KAKUYOMU_LIBRARY_ROOT.iterdir() if path.is_dir()):
+        try:
+            folder_work_id = validate_storage_id(work_root.name, "Kakuyomu work_id")
+        except ValueError:
+            continue
         index_path = work_root / "index.json"
         if not index_path.exists():
             continue
@@ -236,9 +262,13 @@ def write_library_index() -> None:
             data = json.loads(index_path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        try:
+            work_id = validate_storage_id(str(data.get("work_id", folder_work_id)), "Kakuyomu work_id")
+        except ValueError:
+            continue
         works.append(
             {
-                "work_id": str(data.get("work_id", work_root.name)),
+                "work_id": work_id,
                 "work_title": str(data.get("work_title", work_root.name)),
                 "episode_count": int(data.get("episode_count", 0)),
                 "latest_saved_at": str(data.get("episodes", [{}])[0].get("saved_at", "")) if data.get("episodes") else "",
@@ -314,7 +344,7 @@ def render_library_index_html(works: list[dict[str, Any]]) -> str:
           <td>{html.escape(item['work_title'])}</td>
           <td>{item['episode_count']}</td>
           <td>{html.escape(item['latest_saved_at'])}</td>
-          <td><a href="{html.escape('/saved-files/library/kakuyomu/' + item['work_id'] + '/index.html')}">Open Work Index</a></td>
+          <td><a href="{html.escape('/saved-files/library/kakuyomu/' + urllib.parse.quote(item['work_id']) + '/index.html')}">Open Work Index</a></td>
         </tr>
         """
         for item in works

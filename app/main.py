@@ -211,6 +211,8 @@ def translate_pdf(payload: PDFTranslateRequest) -> PDFTranslateResponse:
             source_language=payload.source_language,
             batch_size=payload.batch_size,
             max_new_tokens=payload.max_new_tokens,
+            debug_max_pages=payload.debug_max_pages,
+            debug_max_paragraphs=payload.debug_max_paragraphs,
             translator=translator,
         )
     except FileNotFoundError as exc:
@@ -315,6 +317,8 @@ def translate_and_save_pdf(payload: PDFTranslateRequest) -> PDFSavedResponse:
             source_language=payload.source_language,
             batch_size=payload.batch_size,
             max_new_tokens=payload.max_new_tokens,
+            debug_max_pages=payload.debug_max_pages,
+            debug_max_paragraphs=payload.debug_max_paragraphs,
             translator=translator,
         )
         saved = save_pdf_translation_result(result)
@@ -342,6 +346,8 @@ def create_kakuyomu_ui_job(payload: TranslateWebKakuyomuRequest) -> KakuyomuUiJo
             batch_size=payload.batch_size,
             max_new_tokens=payload.max_new_tokens,
         )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Unable to create Kakuyomu UI job: {exc}") from exc
     return KakuyomuUiJobResponse(**asdict(job))
@@ -372,7 +378,11 @@ def create_pdf_ui_job(payload: PDFTranslateRequest) -> PdfUiJobResponse:
             source_language=payload.source_language,
             batch_size=payload.batch_size,
             max_new_tokens=payload.max_new_tokens,
+            debug_max_pages=payload.debug_max_pages,
+            debug_max_paragraphs=payload.debug_max_paragraphs,
         )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Unable to create PDF UI job: {exc}") from exc
     return PdfUiJobResponse(**asdict(job))
@@ -401,6 +411,8 @@ def get_saved_kakuyomu_result(work_id: str, episode_id: str) -> KakuyomuSavedRes
         saved = load_saved_kakuyomu_result(work_id, episode_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Unable to load saved Kakuyomu result: {exc}") from exc
     return KakuyomuSavedResponse(**saved)
@@ -416,6 +428,8 @@ def get_saved_pdf_result(document_id: str) -> PDFSavedResponse:
         saved = load_saved_pdf_result(document_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Unable to load saved PDF result: {exc}") from exc
     return PDFSavedResponse(**saved)

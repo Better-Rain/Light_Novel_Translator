@@ -212,10 +212,12 @@ def render_web_ui_html(
     .history-item strong {{
       font-size: 14px;
       line-height: 1.5;
+      overflow-wrap: anywhere;
     }}
     .history-item small {{
       color: var(--muted);
       line-height: 1.5;
+      overflow-wrap: anywhere;
     }}
     .history-actions {{
       display: flex;
@@ -243,6 +245,9 @@ def render_web_ui_html(
       border-radius: 16px;
       background: rgba(255, 255, 255, 0.68);
       padding: 12px 14px;
+    }}
+    .meta-card span {{
+      overflow-wrap: anywhere;
     }}
     .meta-card strong {{
       display: block;
@@ -396,6 +401,10 @@ def render_web_ui_html(
       scroll-margin-block: 42vh;
       transition: background-color 0.12s ease, color 0.12s ease;
     }}
+    .compare-sentence:focus-visible {{
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }}
     .compare-sentence.active {{
       background: rgba(126, 43, 29, 0.14);
       color: #5a2016;
@@ -443,12 +452,21 @@ def render_web_ui_html(
       color: var(--accent);
       font-weight: 600;
     }}
+    .debug-badge {{
+      display: inline-block;
+      border-radius: 999px;
+      padding: 5px 9px;
+      background: #f1ded5;
+      color: #7e2b1d;
+      font-size: 12px;
+      font-weight: 700;
+    }}
     .empty {{
       padding: 36px 22px 28px;
       color: var(--muted);
       line-height: 1.7;
     }}
-    @media (max-width: 1100px) {{
+    @media (max-width: 1240px) {{
       .page {{
         grid-template-columns: 1fr;
       }}
@@ -507,7 +525,17 @@ def render_web_ui_html(
             </label>
             <label>
               \u5b58\u50a8\u7b56\u7565
-              <input id="storage-strategy" type="text" value="outputs/library/kakuyomu/<work-id>/<episode-id>" disabled />
+              <input id="storage-strategy" type="text" value="outputs/library/pdf/<document-id>" disabled />
+            </label>
+          </div>
+          <div class="inline-fields">
+            <label>
+              PDF \u8c03\u8bd5\u9875\u6570\u4e0a\u9650
+              <input id="pdf-debug-max-pages" name="debug_max_pages" type="number" min="1" max="10000" placeholder="\u4e0d\u9650\u5236" />
+            </label>
+            <label>
+              PDF \u8c03\u8bd5\u6bb5\u843d\u4e0a\u9650
+              <input id="pdf-debug-max-paragraphs" name="debug_max_paragraphs" type="number" min="1" max="100000" placeholder="\u4e0d\u9650\u5236" />
             </label>
           </div>
           <div class="field-hint">\u9ed8\u8ba4\u9762\u5411\u82f1\u6587 PDF \u6587\u732e\uff0c\u4f1a\u5148\u63d0\u53d6\u6bb5\u843d\uff0c\u518d\u6279\u91cf\u7ffb\u8bd1\u6210\u4e2d\u6587\u3002</div>
@@ -533,9 +561,9 @@ def render_web_ui_html(
           </label>
         </div>
         <button id="submit-btn" type="submit">\u5f00\u59cb\u5904\u7406</button>
-        <div id="status-box" class="status">\u7b49\u5f85\u63d0\u4ea4\u4efb\u52a1\u3002</div>
+        <div id="status-box" class="status" role="status" aria-live="polite">\u7b49\u5f85\u63d0\u4ea4\u4efb\u52a1\u3002</div>
         <div class="progress-block">
-          <div class="progress-track" aria-hidden="true">
+          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div id="progress-fill" class="progress-fill"></div>
           </div>
           <div id="progress-text" class="progress-text">0%</div>
@@ -567,6 +595,7 @@ def render_web_ui_html(
               <div class="meta-card"><strong id="meta-id-label">Identifier</strong><span id="work-episode-id"></span></div>
               <div class="meta-card"><strong>\u6a21\u578b</strong><span id="model-device"></span></div>
               <div class="meta-card"><strong>\u6bb5\u843d\u6570</strong><span id="paragraph-count"></span></div>
+              <div id="debug-limits-card" class="meta-card" style="display:none;"><strong>PDF Debug</strong><span id="debug-limits"></span></div>
             </div>
             <div class="toolbar-links" id="saved-links"></div>
             <div class="mode-bar">
@@ -590,6 +619,8 @@ def render_web_ui_html(
     const urlInput = document.getElementById('episode-url');
     const pdfFilePathInput = document.getElementById('pdf-file-path');
     const pdfSourceLanguageInput = document.getElementById('pdf-source-language');
+    const pdfDebugMaxPagesInput = document.getElementById('pdf-debug-max-pages');
+    const pdfDebugMaxParagraphsInput = document.getElementById('pdf-debug-max-paragraphs');
     const sourcePanelKakuyomu = document.getElementById('source-panel-kakuyomu');
     const sourcePanelPdf = document.getElementById('source-panel-pdf');
     const batchSizeInput = document.getElementById('batch-size');
@@ -613,6 +644,8 @@ def render_web_ui_html(
     const metaIdLabel = document.getElementById('meta-id-label');
     const modelDevice = document.getElementById('model-device');
     const paragraphCount = document.getElementById('paragraph-count');
+    const debugLimitsCard = document.getElementById('debug-limits-card');
+    const debugLimits = document.getElementById('debug-limits');
     const savedLinks = document.getElementById('saved-links');
     const readingView = document.getElementById('view-reading');
     const compareView = document.getElementById('view-compare');
@@ -650,6 +683,7 @@ def render_web_ui_html(
     function setStatus(message, isError = false) {{
       statusBox.textContent = message;
       statusBox.classList.toggle('error', isError);
+      statusBox.setAttribute('role', isError ? 'alert' : 'status');
     }}
 
     function setBusy(isBusy) {{
@@ -661,6 +695,7 @@ def render_web_ui_html(
       const clamped = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
       progressFill.style.width = `${{(clamped * 100).toFixed(1)}}%`;
       progressText.textContent = label ? `${{Math.round(clamped * 100)}}% - ${{label}}` : `${{Math.round(clamped * 100)}}%`;
+      progressFill.closest('.progress-track')?.setAttribute('aria-valuenow', String(Math.round(clamped * 100)));
     }}
 
     function escapeHtml(text) {{
@@ -670,6 +705,10 @@ def render_web_ui_html(
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }}
+
+    function isHeadingKind(kind) {{
+      return kind === 'chapter_heading' || kind === 'heading';
     }}
 
     function splitIntoSentences(text) {{
@@ -739,6 +778,23 @@ def render_web_ui_html(
       return rows;
     }}
 
+    function parseOptionalPositiveInteger(input) {{
+      const value = Number(input.value || 0);
+      if (!Number.isFinite(value) || value <= 0) return null;
+      return Math.floor(value);
+    }}
+
+    function formatDebugLimits(limits) {{
+      if (!limits) return '';
+      const parts = [];
+      if (limits.max_pages) parts.push(`pages ${{limits.max_pages}}`);
+      if (limits.max_paragraphs) parts.push(`paragraphs ${{limits.max_paragraphs}}`);
+      if (limits.limited_paragraph_count !== undefined && limits.original_paragraph_count !== undefined) {{
+        parts.push(`${{limits.limited_paragraph_count}}/${{limits.original_paragraph_count}} kept`);
+      }}
+      return parts.join(', ');
+    }}
+
     function rebuildCompareSentenceMap() {{
       compareSentenceMap = new Map();
       compareView.querySelectorAll('.compare-sentence').forEach(node => {{
@@ -792,7 +848,7 @@ def render_web_ui_html(
 
     function renderReading(paragraphs) {{
       const blocks = paragraphs.map(item => {{
-        if (item.kind === 'heading') {{
+        if (isHeadingKind(item.kind)) {{
           return `
             <section class="reading-heading" id="${{escapeHtml(item.paragraph_id)}}">
               <h3>${{escapeHtml(item.translated_text || item.original_text)}}</h3>
@@ -807,7 +863,7 @@ def render_web_ui_html(
 
     function renderCompare(paragraphs) {{
       const renderArticle = (field) => paragraphs.map(item => {{
-        if (item.kind === 'heading') {{
+        if (isHeadingKind(item.kind)) {{
           const headingText = field === 'original' ? item.original_text : item.translated_text;
           return `
             <section class="compare-heading" id="compare-${{escapeHtml(field)}}-${{escapeHtml(item.paragraph_id)}}">
@@ -819,7 +875,7 @@ def render_web_ui_html(
         const sentenceHtml = rows.map((row, index) => {{
           const sentenceKey = `${{item.paragraph_id}}-${{index + 1}}`;
           const sentenceText = field === 'original' ? row.original : row.translated;
-          return `<span class="compare-sentence" data-sentence-key="${{escapeHtml(sentenceKey)}}">${{escapeHtml(sentenceText || ' ')}}</span>`;
+          return `<span class="compare-sentence" tabindex="0" role="button" aria-selected="false" data-sentence-key="${{escapeHtml(sentenceKey)}}">${{escapeHtml(sentenceText || ' ')}}</span>`;
         }}).join('');
         return `<p class="compare-paragraph">${{sentenceHtml}}</p>`;
       }}).join('');
@@ -840,7 +896,10 @@ def render_web_ui_html(
     }}
 
     function clearCompareHighlight() {{
-      compareView.querySelectorAll('.compare-sentence.active').forEach(node => node.classList.remove('active'));
+      compareView.querySelectorAll('.compare-sentence.active').forEach(node => {{
+        node.classList.remove('active');
+        node.setAttribute('aria-selected', 'false');
+      }});
       compareActiveSentenceKey = '';
     }}
 
@@ -849,9 +908,15 @@ def render_web_ui_html(
       const shouldCenter = Boolean(options.center);
       const sourceColumn = options.sourceNode ? options.sourceNode.closest('.compare-column') : null;
       if (compareActiveSentenceKey !== sentenceKey) {{
-        compareView.querySelectorAll('.compare-sentence.active').forEach(node => node.classList.remove('active'));
+        compareView.querySelectorAll('.compare-sentence.active').forEach(node => {{
+          node.classList.remove('active');
+          node.setAttribute('aria-selected', 'false');
+        }});
         const nodes = compareSentenceMap.get(sentenceKey) || [];
-        nodes.forEach(node => node.classList.add('active'));
+        nodes.forEach(node => {{
+          node.classList.add('active');
+          node.setAttribute('aria-selected', 'true');
+        }});
         compareActiveSentenceKey = sentenceKey;
       }}
       if (shouldCenter) {{
@@ -865,7 +930,7 @@ def render_web_ui_html(
 
     function renderSentence(paragraphs) {{
       sentenceView.innerHTML = paragraphs.map(item => {{
-        const rows = item.kind === 'heading'
+        const rows = isHeadingKind(item.kind)
           ? [{{ index: 1, original: item.original_text, translated: item.translated_text }}]
           : zipSentences(item.original_text, item.translated_text);
         return `
@@ -933,6 +998,9 @@ def render_web_ui_html(
       }}
       modelDevice.textContent = `${{result.model_name}} / ${{result.device}}`;
       paragraphCount.textContent = String((result.paragraphs || []).length);
+      const debugLabel = formatDebugLimits(result.debug_limits);
+      debugLimitsCard.style.display = debugLabel ? 'block' : 'none';
+      debugLimits.textContent = debugLabel;
       renderSavedLinks(result.saved_files);
       renderReading(result.paragraphs || []);
       renderCompare(result.paragraphs || []);
@@ -965,7 +1033,7 @@ def render_web_ui_html(
         historyList.innerHTML = items.length
           ? items.map(item => `
               <article class="history-item">
-                <strong>${{escapeHtml(item.document_title)}}</strong>
+                <strong>${{escapeHtml(item.document_title)}} ${{item.is_debug ? '<span class="debug-badge">DEBUG</span>' : ''}}</strong>
                 <small>${{escapeHtml(item.saved_at)}}<br>${{escapeHtml(item.document_id)}}<br>${{escapeHtml(item.source_file_name)}}</small>
                 <div class="history-actions">
                   <button type="button" class="secondary-btn" data-provider="pdf" data-document-id="${{escapeHtml(item.document_id)}}">\u52a0\u8f7d</button>
@@ -1061,6 +1129,14 @@ def render_web_ui_html(
           source_language: pdfSourceLanguageInput.value,
           ...commonPayload,
         }};
+        const debugMaxPages = parseOptionalPositiveInteger(pdfDebugMaxPagesInput);
+        const debugMaxParagraphs = parseOptionalPositiveInteger(pdfDebugMaxParagraphsInput);
+        if (debugMaxPages !== null) {{
+          payload.debug_max_pages = debugMaxPages;
+        }}
+        if (debugMaxParagraphs !== null) {{
+          payload.debug_max_paragraphs = debugMaxParagraphs;
+        }}
         endpoint = '/ui/api/pdf/jobs';
         if (!payload.file_path) {{
           setStatus('\u8bf7\u5148\u8f93\u5165 PDF \u6587\u4ef6\u8def\u5f84\u3002', true);
@@ -1167,6 +1243,13 @@ def render_web_ui_html(
     compareView.addEventListener('click', event => {{
       const target = event.target.closest('.compare-sentence');
       if (!target) return;
+      setCompareHighlight(target.dataset.sentenceKey || '', {{ center: true, sourceNode: target }});
+    }});
+
+    compareView.addEventListener('keydown', event => {{
+      const target = event.target.closest('.compare-sentence');
+      if (!target || !['Enter', ' '].includes(event.key)) return;
+      event.preventDefault();
       setCompareHighlight(target.dataset.sentenceKey || '', {{ center: true, sourceNode: target }});
     }});
 

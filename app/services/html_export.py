@@ -8,6 +8,14 @@ from typing import Any
 INVALID_FILENAME_CHARS = '<>:"/\\|?*'
 
 
+def is_heading_like_kind(kind: str | None) -> bool:
+    return kind in {"chapter_heading", "heading"}
+
+
+def is_toc_heading_kind(kind: str | None) -> bool:
+    return kind == "chapter_heading"
+
+
 def sanitize_filename_component(value: str) -> str:
     sanitized = "".join("_" if char in INVALID_FILENAME_CHARS or ord(char) < 32 else char for char in value)
     sanitized = sanitized.strip().rstrip(".")
@@ -231,7 +239,7 @@ def render_reading_html(result: dict[str, Any], json_file_name: str, bilingual_f
     toc_items = "\n".join(
         f'<li><a href="#{html.escape(item["paragraph_id"])}">{html.escape(item["translated_text"] or item["original_text"])}</a></li>'
         for item in paragraphs
-        if item.get("kind") == "heading"
+        if is_toc_heading_kind(str(item.get("kind")))
     )
 
     content_blocks: list[str] = []
@@ -239,7 +247,7 @@ def render_reading_html(result: dict[str, Any], json_file_name: str, bilingual_f
         anchor = html.escape(item["paragraph_id"])
         translated_text = html.escape(str(item["translated_text"]))
         original_text = html.escape(str(item["original_text"]))
-        if item.get("kind") == "heading":
+        if is_heading_like_kind(str(item.get("kind"))):
             content_blocks.append(
                 f"""
                 <section class="chapter-heading" id="{anchor}">
@@ -267,7 +275,7 @@ def render_reading_html(result: dict[str, Any], json_file_name: str, bilingual_f
         """
 
     return f"""<!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">

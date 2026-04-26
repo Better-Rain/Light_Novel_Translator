@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
+import os
 import urllib.parse
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -15,9 +17,11 @@ from app.services.html_export import (
     sanitize_filename_component,
 )
 from app.services.pdf_extractor import extract_pdf_paragraphs
+from app.services.storage_paths import safe_child, validate_storage_id
 from app.services.translation import TranslationRuntime
 
 
+LOGGER = logging.getLogger(__name__)
 OUTPUTS_ROOT = Path("outputs").resolve()
 PDF_LIBRARY_ROOT = OUTPUTS_ROOT / "library" / "pdf"
 
@@ -29,11 +33,23 @@ def build_pdf_translation_result(
     batch_size: int,
     max_new_tokens: int,
     translator: TranslationRuntime,
+    debug_max_pages: int | None = None,
+    debug_max_paragraphs: int | None = None,
     extract_progress_callback: Callable[[], None] | None = None,
     translate_progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     source_path = Path(file_path).expanduser().resolve()
     paragraphs = extract_pdf_paragraphs(source_path)
+    paragraphs, debug_limits = _apply_debug_limits(
+        paragraphs,
+        max_pages=debug_max_pages,
+        max_paragraphs=debug_max_paragraphs,
+    )
+    if not paragraphs:
+        detail = "No PDF paragraphs remained after extraction"
+        if debug_limits is not None:
+            detail = f"{detail} and debug limits"
+        raise ValueError(f"{detail}: {source_path}")
     if extract_progress_callback is not None:
         extract_progress_callback()
 
@@ -46,14 +62,16 @@ def build_pdf_translation_result(
         progress_callback=translate_progress_callback,
     )
     document_id = build_pdf_document_id(source_path)
+    if debug_limits is not None:
+        document_id = _build_debug_document_id(document_id, debug_limits)
     document_title = detect_pdf_title(source_path, paragraphs)
     translated_title = document_title
     for item, translated_text in zip(paragraphs, translated_texts, strict=True):
-        if item.kind == "heading" and translated_text.strip():
+        if _is_heading_kind(item.kind) and translated_text.strip():
             translated_title = translated_text.strip()
             break
 
-    return {
+    result = {
         "provider": "pdf",
         "source_language": source_language,
         "target_language": "zh",
@@ -77,6 +95,69 @@ def build_pdf_translation_result(
             for item, translated_text in zip(paragraphs, translated_texts, strict=True)
         ],
     }
+    if debug_limits is not None:
+        result["debug_limits"] = debug_limits
+    return result
+
+
+def _apply_debug_limits(
+    paragraphs: list[Any],
+    *,
+    max_pages: int | None = None,
+    max_paragraphs: int | None = None,
+) -> tuple[list[Any], dict[str, int] | None]:
+    if max_pages is None:
+        max_pages = _read_positive_int_env("PDF_DEBUG_MAX_PAGES")
+    if max_paragraphs is None:
+        max_paragraphs = _read_positive_int_env("PDF_DEBUG_MAX_PARAGRAPHS")
+    if max_pages is None and max_paragraphs is None:
+        return paragraphs, None
+
+    limited = list(paragraphs)
+    debug_info: dict[str, int] = {"original_paragraph_count": len(paragraphs)}
+
+    if max_pages is not None and limited:
+        first_page = min(getattr(item, "page_number", 1) for item in limited)
+        last_page = first_page + max_pages - 1
+        limited = [item for item in limited if getattr(item, "page_number", first_page) <= last_page]
+        debug_info["max_pages"] = max_pages
+        debug_info["kept_through_page"] = last_page
+
+    if max_paragraphs is not None:
+        limited = limited[:max_paragraphs]
+        debug_info["max_paragraphs"] = max_paragraphs
+
+    debug_info["limited_paragraph_count"] = len(limited)
+    return limited, debug_info
+
+
+def _read_positive_int_env(name: str) -> int | None:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return None
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        LOGGER.warning("Ignoring invalid %s=%r; expected a positive integer.", name, raw_value)
+        return None
+    if parsed <= 0:
+        LOGGER.warning("Ignoring invalid %s=%r; expected a positive integer.", name, raw_value)
+        return None
+    return parsed
+
+
+def _is_heading_kind(kind: str) -> bool:
+    return kind in {"chapter_heading", "heading"}
+
+
+def _build_debug_document_id(document_id: str, debug_limits: dict[str, int]) -> str:
+    suffix_parts: list[str] = ["debug"]
+    if "max_pages" in debug_limits:
+        suffix_parts.append(f"p{debug_limits['max_pages']}")
+    if "max_paragraphs" in debug_limits:
+        suffix_parts.append(f"n{debug_limits['max_paragraphs']}")
+    suffix = "-".join(suffix_parts)
+    return f"{document_id}-{suffix}"
 
 
 def save_pdf_translation_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -85,8 +166,9 @@ def save_pdf_translation_result(result: dict[str, Any]) -> dict[str, Any]:
     document["saved_at"] = saved_at
     document["generated_at"] = saved_at
 
-    document_id = str(document["document_id"])
-    document_root = PDF_LIBRARY_ROOT / document_id
+    document_id = validate_storage_id(str(document["document_id"]), "PDF document_id")
+    document["document_id"] = document_id
+    document_root = safe_child(PDF_LIBRARY_ROOT, document_id)
     document_root.mkdir(parents=True, exist_ok=True)
 
     result_json_path = document_root / "result.json"
@@ -114,7 +196,8 @@ def save_pdf_translation_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_saved_pdf_result(document_id: str) -> dict[str, Any]:
-    result_path = PDF_LIBRARY_ROOT / document_id / "result.json"
+    document_id = validate_storage_id(document_id, "PDF document_id")
+    result_path = safe_child(PDF_LIBRARY_ROOT, document_id) / "result.json"
     if not result_path.exists():
         raise FileNotFoundError(f"Saved PDF result not found for document '{document_id}'.")
     document = json.loads(result_path.read_text(encoding="utf-8"))
@@ -132,7 +215,12 @@ def list_saved_pdf_results(limit: int = 20) -> list[dict[str, Any]]:
             data = json.loads(result_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        document_id = str(data.get("document_id") or result_path.parent.name)
+        try:
+            document_id = validate_storage_id(str(data.get("document_id") or result_path.parent.name), "PDF document_id")
+            saved_files = build_pdf_saved_file_metadata(document_id)
+        except ValueError:
+            continue
+        debug_limits = data.get("debug_limits")
         items.append(
             {
                 "document_id": document_id,
@@ -142,10 +230,12 @@ def list_saved_pdf_results(limit: int = 20) -> list[dict[str, Any]]:
                 "saved_at": str(data.get("saved_at", "")),
                 "source_file": str(data.get("source_file", "")),
                 "source_language": str(data.get("source_language", "en")),
+                "debug_limits": debug_limits if isinstance(debug_limits, dict) else None,
+                "is_debug": isinstance(debug_limits, dict) or "-debug-" in document_id,
                 "page_url": f"/?provider=pdf&document_id={urllib.parse.quote(document_id)}",
                 "result_api_url": f"/ui/api/pdf/result/{urllib.parse.quote(document_id)}",
-                "bilingual_html_url": build_pdf_saved_file_metadata(document_id)["bilingual_html_url"],
-                "reading_html_url": build_pdf_saved_file_metadata(document_id)["reading_html_url"],
+                "bilingual_html_url": saved_files["bilingual_html_url"],
+                "reading_html_url": saved_files["reading_html_url"],
             }
         )
 
@@ -154,20 +244,23 @@ def list_saved_pdf_results(limit: int = 20) -> list[dict[str, Any]]:
 
 
 def build_pdf_saved_file_metadata(document_id: str) -> dict[str, str]:
-    document_root = PDF_LIBRARY_ROOT / document_id
+    document_id = validate_storage_id(document_id, "PDF document_id")
+    document_root = safe_child(PDF_LIBRARY_ROOT, document_id)
     relative_root = document_root.relative_to(OUTPUTS_ROOT).as_posix()
+    quoted_relative_root = urllib.parse.quote(relative_root, safe="/")
+    quoted_document_id = urllib.parse.quote(document_id)
     return {
         "storage_dir": str(document_root),
         "result_json": str(document_root / "result.json"),
         "bilingual_html": str(document_root / "bilingual.html"),
         "reading_html": str(document_root / "reading.html"),
         "document_index_html": str(document_root / "index.html"),
-        "result_api_url": f"/ui/api/pdf/result/{document_id}",
+        "result_api_url": f"/ui/api/pdf/result/{quoted_document_id}",
         "page_url": f"/?provider=pdf&document_id={urllib.parse.quote(document_id)}",
-        "result_json_url": f"/saved-files/{relative_root}/result.json",
-        "bilingual_html_url": f"/saved-files/{relative_root}/bilingual.html",
-        "reading_html_url": f"/saved-files/{relative_root}/reading.html",
-        "document_index_html_url": f"/saved-files/{relative_root}/index.html",
+        "result_json_url": f"/saved-files/{quoted_relative_root}/result.json",
+        "bilingual_html_url": f"/saved-files/{quoted_relative_root}/bilingual.html",
+        "reading_html_url": f"/saved-files/{quoted_relative_root}/reading.html",
+        "document_index_html_url": f"/saved-files/{quoted_relative_root}/index.html",
     }
 
 

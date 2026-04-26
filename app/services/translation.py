@@ -29,6 +29,7 @@ class LoadedTranslationModel:
     source_language: str
     target_language: str
     model_name: str
+    model_type: str
     tokenizer: AutoTokenizer
     model: AutoModelForSeq2SeqLM
 
@@ -108,6 +109,7 @@ class TranslationRuntime:
                 source_language=source_language,
                 target_language=target_language,
                 model_name=model_name,
+                model_type=str(getattr(model.config, "model_type", "")),
                 tokenizer=tokenizer,
                 model=model,
             )
@@ -181,18 +183,21 @@ class TranslationRuntime:
         *,
         max_new_tokens: int,
     ) -> list[str]:
+        prepared_paragraphs = self._prepare_paragraphs_for_model(loaded, paragraphs)
         encoded = loaded.tokenizer(
-            paragraphs,
+            prepared_paragraphs,
             return_tensors="pt",
             padding=True,
             truncation=True,
             max_length=512,
         )
         encoded = {key: value.to(self.device) for key, value in encoded.items()}
+        generation_kwargs = self._build_generation_kwargs(loaded)
 
         with torch.inference_mode():
             generated = loaded.model.generate(
                 **encoded,
+                **generation_kwargs,
                 max_new_tokens=max_new_tokens,
                 num_beams=4,
                 length_penalty=1.0,
@@ -202,6 +207,41 @@ class TranslationRuntime:
 
         decoded = loaded.tokenizer.batch_decode(generated, skip_special_tokens=True)
         return [item.strip() for item in decoded]
+
+    def _prepare_paragraphs_for_model(self, loaded: LoadedTranslationModel, paragraphs: list[str]) -> list[str]:
+        if loaded.model_type != "m2m_100":
+            return paragraphs
+        source_token = self._resolve_multilingual_lang_token(loaded, loaded.source_language)
+        return [f"{source_token} {paragraph}".strip() for paragraph in paragraphs]
+
+    def _build_generation_kwargs(self, loaded: LoadedTranslationModel) -> dict[str, int]:
+        if loaded.model_type != "m2m_100":
+            return {}
+        target_token = self._resolve_multilingual_lang_token(loaded, loaded.target_language)
+        target_token_id = loaded.tokenizer.convert_tokens_to_ids(target_token)
+        if target_token_id is None or target_token_id < 0:
+            raise RuntimeError(
+                f"Unable to resolve target language token '{target_token}' for model '{loaded.model_name}'."
+            )
+        return {"forced_bos_token_id": int(target_token_id)}
+
+    def _resolve_multilingual_lang_token(self, loaded: LoadedTranslationModel, language: str) -> str:
+        candidates = {
+            "en": ("eng_Latn", "__en__"),
+            "ja": ("jpn_Jpan", "__ja__"),
+            "zh": ("zho_Hans", "__zh__"),
+        }.get(language)
+        if not candidates:
+            raise RuntimeError(f"Unsupported multilingual language token mapping for language: {language}")
+
+        vocab = loaded.tokenizer.get_vocab()
+        for candidate in candidates:
+            if candidate in vocab:
+                return candidate
+
+        raise RuntimeError(
+            f"Unable to find a language token for '{language}' in model '{loaded.model_name}'. Tried: {candidates!r}"
+        )
 
 
 def build_aligned_paragraphs(text: str) -> list[tuple[str, str]]:

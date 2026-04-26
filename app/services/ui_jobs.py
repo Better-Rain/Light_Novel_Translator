@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -8,6 +10,22 @@ from typing import Any
 from app.services.kakuyomu_pipeline import build_kakuyomu_translation_result, save_kakuyomu_translation_result
 from app.services.pdf_pipeline import build_pdf_translation_result, save_pdf_translation_result
 from app.services.translation import TranslationRuntime
+
+
+def _read_positive_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+MAX_CONCURRENT_UI_JOBS = max(1, _read_positive_int_env("UI_MAX_CONCURRENT_JOBS", 1))
+MAX_RETAINED_JOBS = max(20, _read_positive_int_env("UI_MAX_RETAINED_JOBS", 100))
+UI_JOB_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_UI_JOBS)
 
 
 @dataclass(slots=True)
@@ -21,6 +39,8 @@ class KakuyomuUiJob:
     url: str = ""
     work_id: str | None = None
     episode_id: str | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
 
 
 @dataclass(slots=True)
@@ -33,6 +53,8 @@ class PdfUiJob:
     result: dict[str, Any] | None = None
     file_path: str = ""
     document_id: str | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
 
 
 @dataclass(slots=True)
@@ -49,8 +71,11 @@ class KakuyomuUiJobStore:
         batch_size: int,
         max_new_tokens: int,
     ) -> KakuyomuUiJob:
+        if not UI_JOB_SEMAPHORE.acquire(blocking=False):
+            raise RuntimeError("The local translation worker is busy. Try again after the current job finishes.")
         job = KakuyomuUiJob(job_id=uuid.uuid4().hex, url=url)
         with self._lock:
+            self._cleanup_locked()
             self._jobs[job.job_id] = job
 
         thread = threading.Thread(
@@ -82,6 +107,8 @@ class KakuyomuUiJobStore:
                 url=job.url,
                 work_id=job.work_id,
                 episode_id=job.episode_id,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
             )
 
     def _update_job(self, job_id: str, **changes: Any) -> None:
@@ -89,6 +116,17 @@ class KakuyomuUiJobStore:
             job = self._jobs[job_id]
             for key, value in changes.items():
                 setattr(job, key, value)
+            job.updated_at = time.time()
+
+    def _cleanup_locked(self) -> None:
+        if len(self._jobs) < MAX_RETAINED_JOBS:
+            return
+        removable = sorted(
+            (job for job in self._jobs.values() if job.status in {"completed", "failed"}),
+            key=lambda job: job.updated_at,
+        )
+        for job in removable[: max(1, len(self._jobs) - MAX_RETAINED_JOBS + 1)]:
+            self._jobs.pop(job.job_id, None)
 
     def _run_job(
         self,
@@ -141,6 +179,8 @@ class KakuyomuUiJobStore:
             )
         except Exception as exc:  # noqa: BLE001
             self._update_job(job_id, status="failed", progress=1.0, message="Failed", error=str(exc))
+        finally:
+            UI_JOB_SEMAPHORE.release()
 
 
 @dataclass(slots=True)
@@ -156,9 +196,14 @@ class PdfUiJobStore:
         source_language: str,
         batch_size: int,
         max_new_tokens: int,
+        debug_max_pages: int | None = None,
+        debug_max_paragraphs: int | None = None,
     ) -> PdfUiJob:
+        if not UI_JOB_SEMAPHORE.acquire(blocking=False):
+            raise RuntimeError("The local translation worker is busy. Try again after the current job finishes.")
         job = PdfUiJob(job_id=uuid.uuid4().hex, file_path=file_path)
         with self._lock:
+            self._cleanup_locked()
             self._jobs[job.job_id] = job
 
         thread = threading.Thread(
@@ -169,6 +214,8 @@ class PdfUiJobStore:
                 "source_language": source_language,
                 "batch_size": batch_size,
                 "max_new_tokens": max_new_tokens,
+                "debug_max_pages": debug_max_pages,
+                "debug_max_paragraphs": debug_max_paragraphs,
             },
             daemon=True,
         )
@@ -189,6 +236,8 @@ class PdfUiJobStore:
                 result=job.result,
                 file_path=job.file_path,
                 document_id=job.document_id,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
             )
 
     def _update_job(self, job_id: str, **changes: Any) -> None:
@@ -196,6 +245,17 @@ class PdfUiJobStore:
             job = self._jobs[job_id]
             for key, value in changes.items():
                 setattr(job, key, value)
+            job.updated_at = time.time()
+
+    def _cleanup_locked(self) -> None:
+        if len(self._jobs) < MAX_RETAINED_JOBS:
+            return
+        removable = sorted(
+            (job for job in self._jobs.values() if job.status in {"completed", "failed"}),
+            key=lambda job: job.updated_at,
+        )
+        for job in removable[: max(1, len(self._jobs) - MAX_RETAINED_JOBS + 1)]:
+            self._jobs.pop(job.job_id, None)
 
     def _run_job(
         self,
@@ -205,6 +265,8 @@ class PdfUiJobStore:
         source_language: str,
         batch_size: int,
         max_new_tokens: int,
+        debug_max_pages: int | None,
+        debug_max_paragraphs: int | None,
     ) -> None:
         try:
             self._update_job(job_id, status="running", progress=0.02, message="Extracting PDF paragraphs")
@@ -225,6 +287,8 @@ class PdfUiJobStore:
                 source_language=source_language,
                 batch_size=batch_size,
                 max_new_tokens=max_new_tokens,
+                debug_max_pages=debug_max_pages,
+                debug_max_paragraphs=debug_max_paragraphs,
                 translator=self.translator,
                 extract_progress_callback=mark_extracted,
                 translate_progress_callback=mark_translation_progress,
@@ -246,3 +310,5 @@ class PdfUiJobStore:
             )
         except Exception as exc:  # noqa: BLE001
             self._update_job(job_id, status="failed", progress=1.0, message="Failed", error=str(exc))
+        finally:
+            UI_JOB_SEMAPHORE.release()
